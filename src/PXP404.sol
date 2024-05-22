@@ -81,14 +81,17 @@ contract PXP404 is Ownable, ERC721Holder, IERC404 {
         if (balanceToApprove == 0) {
             // approve a single ID
             balanceToApprove = valueOrId & ID_MASK;
-            if (!_checkIfIdIsValid(balanceToApprove)) {
+            if (
+                !_checkIfIdIsValid(balanceToApprove) ||
+                _idInfo[balanceToApprove].isFractioned
+            ) {
                 revert PXP404__InvalidId(balanceToApprove);
             }
             // Check for ID ownership
             if (_idInfo[balanceToApprove].owner != msg.sender) {
                 revert PXP404__InvalidOwner();
             }
-            getApproved[balanceToApprove] = spenderOrOperator;
+            _getApproved[balanceToApprove] = spenderOrOperator;
             emit Approval(msg.sender, spenderOrOperator, balanceToApprove);
         } else {
             // approve a balance
