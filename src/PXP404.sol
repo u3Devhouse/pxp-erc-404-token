@@ -127,6 +127,21 @@ contract PXP404 is Ownable, ERC721Holder, IERC404 {
     //----------------------------------------------------
     // External / Public VIEW - PURE Functions
     //----------------------------------------------------
+    function balanceOf(address _owner) public view returns (uint) {
+        return _userInfo[_owner].balance;
+    }
+
+    /**
+     * @notice Returns the IDs owned by the owner
+     * @param _owner The owner of the IDs
+     * @return The IDs owned by the owner
+     */
+    function userOwnedIds(
+        address _owner
+    ) external view returns (uint[] memory) {
+        return _userInfo[_owner].ownedIds;
+    }
+
     function ownerOf(uint id) public view returns (address) {
         if (!_checkIfIdIsValid(id)) {
             revert PXP404__InvalidId(id);
