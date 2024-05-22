@@ -179,6 +179,13 @@ contract PXP404 is Ownable, ERC721Holder, IERC404 {
         return _allowanceInfo[_owner][spender].allowance;
     }
 
+    function isApprovedForAll(
+        address _operator,
+        address _owner
+    ) external view returns (bool) {
+        return _allowanceInfo[_owner][_operator].approvedForAll;
+    }
+
     //----------------------------------------------------
     // Internal / Private VIEW - PURE Functions
     //----------------------------------------------------
