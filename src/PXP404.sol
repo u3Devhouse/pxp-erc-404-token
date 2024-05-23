@@ -3,14 +3,16 @@ pragma solidity 0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC404} from "./interfaces/IERC404.sol";
-import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
-contract PXP404 is Ownable, ERC721Holder, IERC404 {
+contract PXP404 is Ownable, IERC404 {
     //----------------------------------------------------
     // Errors
     //----------------------------------------------------
     error PXP404__InvalidId(uint id);
     error PXP404__InvalidOwner();
+    error PXP404__InvalidApproval();
+    error PXP404__UnsafeRecipient();
     //----------------------------------------------------
     // Data Structure
     //----------------------------------------------------
@@ -44,6 +46,7 @@ contract PXP404 is Ownable, ERC721Holder, IERC404 {
     uint[] private _queuedIds;
     uint private maxCurrentMintedId;
     /// @dev these are the bits that are used to represent IDs
+    uint private constant UNIT = 1 ether;
     uint private constant BITS_FOR_ID = 16;
     uint private constant ID_MASK = 0xffff;
 
@@ -116,17 +119,213 @@ contract PXP404 is Ownable, ERC721Holder, IERC404 {
      * @param _newWhitelist The address to set the whitelist status for
      * @param _isWhitelisted The new whitelist status, if true the address is whitelisted, if false the address is not whitelisted
      */
-    function setWhitelisedStatus(
+    function setWhitelistedStatus(
         address _newWhitelist,
         bool _isWhitelisted
     ) external onlyOwner {
         whitelist[_newWhitelist] = _isWhitelisted;
+
+        UserInfo storage newWhitelistUser = _userInfo[_newWhitelist];
+        if (_isWhitelisted) {
+            uint idsHeld = newWhitelistUser.ownedIds.length;
+            for (uint i = 0; i < idsHeld; i++) {
+                uint ownedLastIndex = newWhitelistUser.ownedIds.length - 1;
+                uint idValue = newWhitelistUser.ownedIds[ownedLastIndex];
+                _queuedIds.push(idValue);
+                _getApproved[idValue] = address(0);
+                newWhitelistUser.ownedIds.pop();
+            }
+        } else {
+            uint heldBalance = newWhitelistUser.balance;
+            uint idsToMint = heldBalance / UNIT;
+            for (uint i = 0; i < idsToMint; i++) {
+                if (_queuedIds.length > 0) {
+                    uint lastIndex = _queuedIds.length - 1;
+                    newWhitelistUser.ownedIds.push(_queuedIds[lastIndex]);
+                    _queuedIds.pop();
+                } else {
+                    newWhitelistUser.ownedIds.push(maxCurrentMintedId);
+                    maxCurrentMintedId++;
+                }
+            }
+        }
         emit WhitelistStatusChanged(_newWhitelist, _isWhitelisted);
+    }
+
+    function transfer(
+        address _to,
+        uint amountOrId
+    ) public override returns (bool) {
+        return _transfer(msg.sender, _to, amountOrId);
+    }
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 id
+    ) public override {
+        transferFrom(from, to, id);
+        if (
+            to.code.length != 0 &&
+            IERC721Receiver(to).onERC721Received(msg.sender, from, id, "") !=
+            IERC721Receiver.onERC721Received.selector
+        ) {
+            revert PXP404__UnsafeRecipient();
+        }
+    }
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 id,
+        bytes memory data
+    ) public override {
+        transferFrom(from, to, id);
+        if (
+            to.code.length != 0 &&
+            IERC721Receiver(to).onERC721Received(msg.sender, from, id, data) !=
+            IERC721Receiver.onERC721Received.selector
+        ) {
+            revert PXP404__UnsafeRecipient();
+        }
+    }
+
+    function transferFrom(
+        address _from,
+        address _to,
+        uint amountOrId
+    ) public override returns (bool) {
+        if (amountOrId >> BITS_FOR_ID == 0) {
+            // id
+            // check approve for all or approve for id
+            if (
+                !_allowanceInfo[_from][msg.sender].approvedForAll &&
+                !(_getApproved[amountOrId] == msg.sender)
+            ) {
+                revert PXP404__InvalidApproval();
+            }
+            _getApproved[amountOrId] = address(0);
+        } else {
+            // balance
+            uint allowanceCheck = amountOrId >> BITS_FOR_ID;
+            // check allowance
+            if (_allowanceInfo[_from][msg.sender].allowance < allowanceCheck) {
+                revert PXP404__InvalidApproval();
+            }
+            _allowanceInfo[_from][msg.sender].allowance -= allowanceCheck;
+        }
+        return _transfer(_from, _to, amountOrId);
     }
 
     //----------------------------------------------------
     // Internal / Private Functions
     //----------------------------------------------------
+    /**
+     * @notice Transfers an ID or a balance to another address
+     * @param _to The address to transfer the ID or balance to
+     * @param amountOrId The ID or balance to transfer
+     * @return True if the transfer was successful, reverts otherwise
+     *
+     * @dev GENERAL NOTES TO CONSIDER
+     *  - Whitelisted users cannot have any IDs associated to them
+     *
+     * @dev ID TRANSFER NOTES
+     *  - Whitelisted users cannot transfer IDs
+     *  - Whitelisted users that receive IDs, the ID is sent to the queue.
+     *
+     * @dev BALANCE TRANSFER NOTES
+     */
+    function _transfer(
+        address _from,
+        address _to,
+        uint amountOrId
+    ) internal returns (bool) {
+        UserInfo storage sender = _userInfo[_from];
+        UserInfo storage receiver = _userInfo[_to];
+        if (amountOrId >> BITS_FOR_ID == 0) {
+            // transfer a single ID
+            if (!_checkIfIdIsValid(amountOrId) || whitelist[_from]) {
+                revert PXP404__InvalidId(amountOrId);
+            }
+            IdInfo storage idToTransfer = _idInfo[amountOrId];
+            if (ownerOf(amountOrId) != _from) {
+                revert PXP404__InvalidOwner();
+            }
+            // removeID from owner
+            uint arrayLength = sender.ownedIds.length;
+            uint lastArrayValue = sender.ownedIds[arrayLength - 1];
+            sender.ownedIds[idToTransfer.ownerArrayIndex] = lastArrayValue;
+            sender.ownedIds.pop();
+            // deduct balance from owner
+            sender.balance -= 1 ether;
+            // increase balance of receiver
+            receiver.balance += 1 ether;
+            if (whitelist[_to]) {
+                _queuedIds.push(amountOrId);
+            } else {
+                // add ID to receiver
+                receiver.ownedIds.push(amountOrId);
+            }
+            // emit transfer event
+            emit Transfer(_from, _to, amountOrId);
+            return true;
+        } else {
+            // Clean up amount
+            amountOrId = amountOrId >> BITS_FOR_ID;
+            amountOrId = amountOrId << BITS_FOR_ID;
+            // transfer a balance
+            sender.balance -= amountOrId;
+            receiver.balance += amountOrId;
+
+            // Transfer of IDs
+            uint idsToSend = 0;
+            uint[] memory idsToSendArray = new uint[](0);
+            if (!whitelist[_from]) {
+                idsToSend = sender.ownedIds.length;
+                idsToSend -= sender.balance / UNIT; // 3.5 ether / 1 ether = 3
+                idsToSendArray = new uint[](idsToSend);
+                for (uint i = 0; i < idsToSend; i++) {
+                    uint lastIndex = sender.ownedIds.length - 1;
+                    idsToSendArray[i] = sender.ownedIds[lastIndex];
+                    _getApproved[idsToSendArray[i]] = address(0);
+                    sender.ownedIds.pop();
+                }
+            }
+            if (idsToSend > 0) {
+                if (whitelist[_to]) {
+                    for (uint j = 0; j < idsToSend; j++) {
+                        _queuedIds.push(idsToSendArray[j]);
+                    }
+                } else {
+                    for (uint j = 0; j < idsToSend; j++) {
+                        receiver.ownedIds.push(idsToSendArray[j]);
+                    }
+                }
+            }
+            if (!whitelist[_to]) {
+                /// Getting NEW ids
+                // 3.5 ether + 3.5 ether = 7 ether / 1 ether = 7 -> ids Held = 6
+                uint idsToGet = receiver.balance /
+                    UNIT -
+                    receiver.ownedIds.length;
+                for (uint i = 0; i < idsToGet; i++) {
+                    /// else MINT new ID
+                    if (_queuedIds.length > 0) {
+                        uint lastIndex = _queuedIds.length - 1;
+                        receiver.ownedIds.push(_queuedIds[lastIndex]);
+                        _queuedIds.pop();
+                    } else {
+                        receiver.ownedIds.push(maxCurrentMintedId);
+                        maxCurrentMintedId++;
+                    }
+                }
+            }
+
+            emit Transfer(_from, _to, amountOrId);
+            return true;
+        }
+    }
+
     //----------------------------------------------------
     // External / Public VIEW - PURE Functions
     //----------------------------------------------------
@@ -152,7 +351,6 @@ contract PXP404 is Ownable, ERC721Holder, IERC404 {
         if (id < maxCurrentMintedId) {
             return owner();
         }
-        address idOwner = _idInfo[id].owner;
         if (_idInfo[id].isFractioned) {
             return address(0);
         }
