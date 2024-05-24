@@ -4,8 +4,12 @@ pragma solidity 0.8.24;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC404} from "./interfaces/IERC404.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+
+import {console} from "forge-std/console.sol";
 
 contract PXP404 is Ownable, IERC404 {
+    using Strings for uint256;
     //----------------------------------------------------
     // Errors
     //----------------------------------------------------
@@ -212,7 +216,9 @@ contract PXP404 is Ownable, IERC404 {
             if (_allowanceInfo[_from][msg.sender].allowance < allowanceCheck) {
                 revert PXP404__InvalidApproval();
             }
-            _allowanceInfo[_from][msg.sender].allowance -= allowanceCheck;
+            _allowanceInfo[_from][msg.sender].allowance -=
+                allowanceCheck <<
+                BITS_FOR_ID;
         }
         return _transfer(_from, _to, amountOrId);
     }
@@ -276,13 +282,14 @@ contract PXP404 is Ownable, IERC404 {
             // transfer a balance
             sender.balance -= amountOrId;
             receiver.balance += amountOrId;
-
+            // @audit-ok
             // Transfer of IDs
             uint idsToSend = 0;
             uint[] memory idsToSendArray = new uint[](0);
             if (!whitelist[_from]) {
-                idsToSend = sender.ownedIds.length;
-                idsToSend -= sender.balance / UNIT; // 3.5 ether / 1 ether = 3
+                idsToSend = sender.ownedIds.length; // should be 15
+                idsToSend -= sender.balance / UNIT; // sending 9.3 diff should be 6
+
                 idsToSendArray = new uint[](idsToSend);
                 for (uint i = 0; i < idsToSend; i++) {
                     uint lastIndex = sender.ownedIds.length - 1;
@@ -291,32 +298,53 @@ contract PXP404 is Ownable, IERC404 {
                     sender.ownedIds.pop();
                 }
             }
+            uint idsToGet = 0;
             if (idsToSend > 0) {
                 if (whitelist[_to]) {
                     for (uint j = 0; j < idsToSend; j++) {
                         _queuedIds.push(idsToSendArray[j]);
+                        _idInfo[idsToSendArray[j]].isFractioned = true;
+                        _idInfo[idsToSendArray[j]].owner = address(0);
                     }
                 } else {
-                    for (uint j = 0; j < idsToSend; j++) {
+                    idsToGet =
+                        (receiver.balance / UNIT) - // 9.3 ~ 9
+                        receiver.ownedIds.length; // 0
+                    uint receiveFromSender = idsToSend > idsToGet
+                        ? idsToGet
+                        : idsToSend;
+                    for (uint j = 0; j < receiveFromSender; j++) {
                         receiver.ownedIds.push(idsToSendArray[j]);
+                        _idInfo[idsToSendArray[j]].isFractioned = false;
+                        _idInfo[idsToSendArray[j]].owner = _to;
+                    }
+                    if (idsToSend > receiveFromSender) {
+                        for (uint j = receiveFromSender; j < idsToSend; j++) {
+                            _queuedIds.push(idsToSendArray[j]);
+                            _idInfo[idsToSendArray[j]].isFractioned = true;
+                            _idInfo[idsToSendArray[j]].owner = address(0);
+                        }
                     }
                 }
             }
             if (!whitelist[_to]) {
                 /// Getting NEW ids
-                // 3.5 ether + 3.5 ether = 7 ether / 1 ether = 7 -> ids Held = 6
-                uint idsToGet = receiver.balance /
-                    UNIT -
-                    receiver.ownedIds.length;
+                idsToGet =
+                    (receiver.balance / UNIT) - // 9.3 ~ 9
+                    receiver.ownedIds.length; // 0
                 for (uint i = 0; i < idsToGet; i++) {
                     /// else MINT new ID
                     if (_queuedIds.length > 0) {
-                        uint lastIndex = _queuedIds.length - 1;
-                        receiver.ownedIds.push(_queuedIds[lastIndex]);
+                        uint lastIndexValue = _queuedIds.length - 1;
+                        lastIndexValue = _queuedIds[lastIndexValue];
+                        receiver.ownedIds.push(lastIndexValue);
+                        _idInfo[lastIndexValue].isFractioned = false;
+                        _idInfo[lastIndexValue].owner = _to;
                         _queuedIds.pop();
                     } else {
-                        receiver.ownedIds.push(maxCurrentMintedId);
                         maxCurrentMintedId++;
+                        receiver.ownedIds.push(maxCurrentMintedId);
+                        _idInfo[maxCurrentMintedId].owner = _to;
                     }
                 }
             }
@@ -348,7 +376,7 @@ contract PXP404 is Ownable, IERC404 {
         if (!_checkIfIdIsValid(id)) {
             revert PXP404__InvalidId(id);
         }
-        if (id < maxCurrentMintedId) {
+        if (id > maxCurrentMintedId) {
             return owner();
         }
         if (_idInfo[id].isFractioned) {
@@ -364,7 +392,7 @@ contract PXP404 is Ownable, IERC404 {
         if (_idInfo[id].isFractioned) {
             return address(0);
         }
-        if (id < maxCurrentMintedId) {
+        if (id > maxCurrentMintedId) {
             return address(0);
         }
         return _getApproved[id];
@@ -384,6 +412,20 @@ contract PXP404 is Ownable, IERC404 {
         return _allowanceInfo[_owner][_operator].approvedForAll;
     }
 
+    function tokenURI(uint256 id) external view returns (string memory) {
+        if (!_checkIfIdIsValid(id)) {
+            revert PXP404__InvalidId(id);
+        }
+        return
+            string.concat(
+                string.concat(
+                    "ipfs://bafybeicguehuve4djpaf6ay2drq7lb6wlpy43fyfsfr6vlri3z2rzt2e7u/",
+                    id.toString()
+                ),
+                ".json"
+            );
+    }
+
     //----------------------------------------------------
     // Internal / Private VIEW - PURE Functions
     //----------------------------------------------------
@@ -393,6 +435,6 @@ contract PXP404 is Ownable, IERC404 {
      * @return True if the id is valid, false otherwise
      */
     function _checkIfIdIsValid(uint id) private view returns (bool) {
-        return id < totalSupply;
+        return id <= totalSupply && id > 0;
     }
 }
