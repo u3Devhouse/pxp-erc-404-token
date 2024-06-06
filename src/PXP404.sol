@@ -2,11 +2,10 @@
 pragma solidity 0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC404} from "./interfaces/IERC404.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-
-import {console} from "forge-std/console.sol";
 
 contract PXP404 is Ownable, IERC404 {
     using Strings for uint256;
@@ -17,6 +16,9 @@ contract PXP404 is Ownable, IERC404 {
     error PXP404__InvalidOwner();
     error PXP404__InvalidApproval();
     error PXP404__UnsafeRecipient();
+    error PXP404__InvalidAddress();
+    error PXP404__Redundant();
+    error PXP404__TransferFailed();
     //----------------------------------------------------
     // Data Structure
     //----------------------------------------------------
@@ -127,6 +129,12 @@ contract PXP404 is Ownable, IERC404 {
         address _newWhitelist,
         bool _isWhitelisted
     ) external onlyOwner {
+        if (_newWhitelist == address(0)) {
+            revert PXP404__InvalidAddress();
+        }
+        if (_isWhitelisted == whitelist[_newWhitelist]) {
+            revert PXP404__Redundant();
+        }
         whitelist[_newWhitelist] = _isWhitelisted;
 
         UserInfo storage newWhitelistUser = _userInfo[_newWhitelist];
@@ -221,6 +229,20 @@ contract PXP404 is Ownable, IERC404 {
                 BITS_FOR_ID;
         }
         return _transfer(_from, _to, amountOrId);
+    }
+
+    function removeRogueTokens(address _token) external onlyOwner {
+        uint balance;
+        if (_token == address(0)) {
+            balance = address(this).balance;
+            (bool success, ) = payable(owner()).call{value: balance}("");
+            if (!success) {
+                revert PXP404__TransferFailed();
+            }
+            return;
+        }
+        balance = IERC20(_token).balanceOf(address(this));
+        IERC20(_token).transfer(owner(), balance);
     }
 
     //----------------------------------------------------
