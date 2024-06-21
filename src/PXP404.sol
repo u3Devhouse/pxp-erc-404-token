@@ -6,8 +6,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC404} from "./interfaces/IERC404.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract PXP404 is Ownable, IERC404 {
+contract PXP404 is Ownable, IERC404, ReentrancyGuard {
     using Strings for uint256;
     //----------------------------------------------------
     // Errors
@@ -167,7 +168,7 @@ contract PXP404 is Ownable, IERC404 {
     function transfer(
         address _to,
         uint amountOrId
-    ) public override returns (bool) {
+    ) public override nonReentrant returns (bool) {
         return _transfer(msg.sender, _to, amountOrId);
     }
 
@@ -175,8 +176,8 @@ contract PXP404 is Ownable, IERC404 {
         address from,
         address to,
         uint256 id
-    ) public override {
-        transferFrom(from, to, id);
+    ) public override nonReentrant {
+        _transferFrom(from, to, id);
         if (
             to.code.length != 0 &&
             IERC721Receiver(to).onERC721Received(msg.sender, from, id, "") !=
@@ -191,8 +192,8 @@ contract PXP404 is Ownable, IERC404 {
         address to,
         uint256 id,
         bytes memory data
-    ) public override {
-        transferFrom(from, to, id);
+    ) public override nonReentrant {
+        _transferFrom(from, to, id);
         if (
             to.code.length != 0 &&
             IERC721Receiver(to).onERC721Received(msg.sender, from, id, data) !=
@@ -206,7 +207,15 @@ contract PXP404 is Ownable, IERC404 {
         address _from,
         address _to,
         uint amountOrId
-    ) public override returns (bool) {
+    ) public override nonReentrant returns (bool) {
+        return _transferFrom(_from, _to, amountOrId);
+    }
+
+    function _transferFrom(
+        address _from,
+        address _to,
+        uint amountOrId
+    ) internal returns (bool) {
         if (amountOrId >> BITS_FOR_ID == 0) {
             // id
             // check approve for all or approve for id
